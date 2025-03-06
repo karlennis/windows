@@ -1,0 +1,6 @@
+boto3
+psycopg2-binary
+openai
+pinecone
+sentence-transformers
+python-dotenv
