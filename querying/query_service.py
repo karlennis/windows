@@ -66,6 +66,9 @@ def fetch_relevant_chunks(chunk_ids):
 
     # Combine chunks per document
     combined_docs = {app: "\n".join(parts) for app, parts in documents.items()}
+    for doc_id, content in combined_docs.items():
+        print(f"Combined doc for {doc_id}:")
+        print(content)
     return combined_docs
 
 def generate_answer(question, documents):
