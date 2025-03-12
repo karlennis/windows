@@ -3,6 +3,6 @@ flask-cors
 boto3
 psycopg2-binary
 openai
-pinecone-client
+pinecone
 sentence-transformers
 python-dotenv
