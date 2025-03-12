@@ -61,5 +61,5 @@ def generate_ai_report():
 
 # Run the API on the correct port
 if __name__ == '__main__':
-    port = int(os.environ.get("PORT", 8080)) 
-    app.run(host="0.0.0.0", port=port, debug=True)
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host="0.0.0.0", port=port)
