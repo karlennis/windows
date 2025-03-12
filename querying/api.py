@@ -11,6 +11,10 @@ load_dotenv()
 app = Flask(__name__)
 CORS(app)  # Allow frontend to interact with backend
 
+@app.route('/', methods=['GET'])
+def home():
+    return jsonify({"message": "Flask API is running! Use /query or /report."})
+
 # Route to handle AI queries
 @app.route('/query', methods=['POST'])
 def handle_query():
