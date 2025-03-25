@@ -55,7 +55,7 @@ def search_pinecone(query_text, top_k=10):
 
 def fetch_chunk_from_s3(application_number, chunk_index, chunk_size=200):
     """Fetch only the relevant chunk from the full document in S3."""
-    s3_key = f"sample_projects_20250110/{application_number}/docfiles.txt"
+    s3_key = f"planning_documents_2025_03/{application_number}/docfiles.txt"
 
     try:
         response = s3.get_object(Bucket=S3_BUCKET, Key=s3_key)
