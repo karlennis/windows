@@ -1,35 +1,37 @@
 import boto3
+import sys
 import os
-from utils.config import S3_BUCKET, S3_REGION
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-# Initialize S3 client
+from utils.config import S3_BUCKET, S3_REGION
+from dotenv import load_dotenv
+load_dotenv()
+
+
 s3 = boto3.client('s3', region_name=S3_REGION)
 
-def upload_folder_to_s3(base_folder, application_number):
-    """
-    Recursively uploads all files inside the given base folder to S3 under a prefix matching application_number.
-    This preserves subfolder structure inside S3.
-    """
-    for root, _, files in os.walk(base_folder):
-        for file in files:
-            local_path = os.path.join(root, file)
+def upload_docfiles_to_s3(renamed_folder_path, application_number, s3_prefix):
+    target_file = os.path.join(renamed_folder_path, "docfiles.txt")
+    if os.path.isfile(target_file):
+        s3_key = f"{s3_prefix}/{application_number}/docfiles.txt"
+        s3.upload_file(target_file, S3_BUCKET, s3_key)
+        print(f"☁️ Uploaded to s3://{S3_BUCKET}/{s3_key}")
+    else:
+        print(f"⚠️ No docfiles.txt found in {renamed_folder_path}")
 
-            # Compute S3 key (relative path under application_number)
-            relative_path = os.path.relpath(local_path, base_folder)
-            s3_key = f"{application_number}/{relative_path.replace('\\', '/')}"  # Handle Windows backslashes for S3
+def upload_all(s3_prefix):
+    script_dir = os.path.dirname(__file__)
+    docfiles_dir = os.path.join(script_dir, "renameScript", "docfiles")
 
-            s3.upload_file(local_path, S3_BUCKET, s3_key)
-            print(f"Uploaded {local_path} to s3://{S3_BUCKET}/{s3_key}")
+    for folder_name in os.listdir(docfiles_dir):
+        folder_path = os.path.join(docfiles_dir, folder_name)
+        if os.path.isdir(folder_path):
+            upload_docfiles_to_s3(folder_path, folder_name, s3_prefix)
 
 if __name__ == "__main__":
-    # Locate the `sample_projects_20250110` folder in `data`
-    script_dir = os.path.dirname(__file__)
-    project_root = os.path.abspath(os.path.join(script_dir, '..'))
-    base_folder = os.path.join(project_root, 'data', 'sample_projects_20250110')
+    if len(sys.argv) < 2:
+        print("❌ Error: Missing S3 prefix argument.")
+        sys.exit(1)
 
-    application_number = "sample_projects_20250110"
-
-    if os.path.exists(base_folder):
-        upload_folder_to_s3(base_folder, application_number)
-    else:
-        print(f"Error: Folder {base_folder} does not exist.")
+    s3_prefix = sys.argv[1]
+    upload_all(s3_prefix)
