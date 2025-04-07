@@ -5,7 +5,7 @@ import re
 import requests
 from dotenv import load_dotenv
 from pinecone import Pinecone
-from sentence_transformers import SentenceTransformer
+# Removed SentenceTransformer since we are no longer using the local model
 from utils.config import PINECONE_API_KEY, OPENAI_API_KEY, S3_BUCKET, S3_REGION
 import openai
 
@@ -13,7 +13,7 @@ load_dotenv()
 
 # Initialize Pinecone, S3, and OpenAI
 pc = Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
-index = pc.Index("planning-docs")
+index = pc.Index("openai-docs")
 s3 = boto3.client(
     's3',
     aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
@@ -22,64 +22,83 @@ s3 = boto3.client(
 )
 
 openai.api_key = OPENAI_API_KEY
-embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
 
-
-def embed_text(text):
-    """Generate embeddings using local sentence-transformers model."""
-    return embedding_model.encode(text, normalize_embeddings=True).tolist()
-
-
-def search_pinecone(query_text, top_k=10, filter_obj=None):
+def search_pinecone(query_text, top_k=50, filter_obj=None):
     """
-    Perform semantic search on Pinecone index.
-    If a filter_obj is provided, it is passed along (though in our case, we
-    rely on manual filtering since the vector IDs are formatted as "id_chunk_x").
+    Enhanced semantic search with hybrid scoring (semantic + keyword) using only the OpenAI embedding model.
     """
-    query_embedding = embed_text(query_text)
+    SIMILARITY_THRESHOLD = 0.2
+    FINAL_TOP_K = 15
+    NAMESPACE = "default"
+
+    # 1. Embed the query using the OpenAI embedding model
+    embedding = openai.embeddings.create(
+        model="text-embedding-3-small",
+        input=[query_text]
+    )
+    query_embedding = embedding.data[0].embedding
+
+    # 2. Query Pinecone with the filter if provided
     results = index.query(
         vector=query_embedding,
         top_k=top_k,
-        filter=filter_obj,  # may be None
-        include_metadata=True
+        include_metadata=True,
+        filter=filter_obj,
+        namespace=NAMESPACE
     )
 
     if not results.get("matches"):
         print("⚠️ No relevant chunks found.")
         return [], {}
 
-    project_ids = set()
-    chunk_data = {}
-
-    print("\n🔍 **Top Relevant Chunks:**")
-    for match in results['matches']:
-        # Try to use metadata if available; otherwise extract project id from the vector id
-        project_id = match.get("metadata", {}).get("project_id", match["id"].split("_chunk_")[0])
+    # 3. Hybrid scoring
+    print("\n🔍 **Top Relevant Chunks (Raw):**")
+    enriched = []
+    for match in results["matches"]:
+        metadata = match.get("metadata", {})
+        # Ensure project_id is a string for consistency
+        project_id = str(metadata.get("project_id", match["id"].split("_chunk_")[0]))
         chunk_number = match["id"].split("_chunk_")[-1]
-        project_ids.add(project_id)
+        score = match["score"]
 
-        chunk_text = fetch_chunk_from_s3(project_id, int(chunk_number))
-        if chunk_text:
-            if project_id not in chunk_data:
-                chunk_data[project_id] = []
-            chunk_data[project_id].append(chunk_text)
+        # Use metadata chunk if available, otherwise fetch from S3
+        chunk_text_value = metadata.get("chunk_text") or fetch_chunk_from_s3(project_id, int(chunk_number))
 
-        print(f"- Project ID: {project_id}, Chunk: {chunk_number}, Score: {match['score']:.2f}")
+        # Add a bonus for keyword overlap in hybrid scoring
+        keyword_hits = sum(word.lower() in chunk_text_value.lower() for word in query_text.split())
+        hybrid_score = score + 0.01 * keyword_hits
 
-    return list(project_ids), chunk_data
+        enriched.append({
+            "project_id": project_id,
+            "chunk_number": chunk_number,
+            "original_score": score,
+            "hybrid_score": hybrid_score,
+            "chunk_text": chunk_text_value
+        })
+
+    # 4. Filter and sort the results
+    filtered = [m for m in enriched if m["original_score"] >= SIMILARITY_THRESHOLD]
+    top_results = sorted(filtered, key=lambda x: x["hybrid_score"], reverse=True)[:FINAL_TOP_K]
+
+    chunk_data = {}
+    for m in top_results:
+        chunk_data.setdefault(m["project_id"], []).append(m["chunk_text"])
+        print(f"- Project {m['project_id']} | Chunk {m['chunk_number']} | Score: {m['original_score']:.2f} | Hybrid: {m['hybrid_score']:.2f}")
+
+    return list(chunk_data.keys()), chunk_data
 
 
-def fetch_chunk_from_s3(application_number, chunk_index, chunk_size=200):
-    """Fetch only the relevant chunk from the full document in S3."""
-    s3_key = f"planning_documents_2025_03/{application_number}/docfiles.txt"
-
+def fetch_chunk_from_s3(application_number, chunk_index, chunk_size=300):
+    """
+    Fetch only the relevant chunk from the full document in S3.
+    """
+    s3_key = f"planning_documents_2025_04/{application_number}/docfiles.txt"
     try:
         response = s3.get_object(Bucket=S3_BUCKET, Key=s3_key)
         full_text = response["Body"].read().decode("utf-8")
     except Exception as e:
         print(f"⚠️ Failed to fetch {s3_key}: {e}")
         return ""
-
     words = full_text.split()
     start = chunk_index * chunk_size
     end = start + chunk_size
@@ -89,11 +108,10 @@ def fetch_chunk_from_s3(application_number, chunk_index, chunk_size=200):
 def fetch_contact_details(project_ids):
     """
     Search for 'Applicant Details' or similar sections to extract contact information.
-    This function performs another Pinecone search using a contact-focused query.
     """
-    contact_query = "Find the 'Applicant Details' or contact section including names, emails, phone numbers, and company details."
-    # Multiply top_k by the number of projects to try to cover all relevant chunks.
-    _, contact_chunk_data = search_pinecone(contact_query, top_k=3 * len(project_ids))
+    contact_query = ("Find the 'Applicant Details' or contact section including names, emails, "
+                     "phone numbers, and company details.")
+    _, contact_chunk_data = search_pinecone(contact_query, top_k=7 * len(project_ids))
     combined_docs = {app: "\n".join(parts) for app, parts in contact_chunk_data.items()}
     return combined_docs
 
@@ -153,7 +171,9 @@ def generate_report(question, project_ids, chunk_data, api_details=None):
                 f"{api_details[project_id]['planning_urlopen']}\n\n"
             )
         print(f"📊 Extracting details for project {project_id}...")
-        project_details = extract_project_details(contact_chunks.get(project_id, "No applicant details found."))
+        project_details = extract_project_details(
+            contact_chunks.get(project_id, "No applicant details found.")
+        )
         feature_mentions = extract_feature_mentions(question, chunk_data.get(project_id, ["No mentions found."]))
         section = f"{header}" + \
                   f"**Project {project_id} Details:**\n{project_details}\n\n" \
@@ -179,7 +199,7 @@ def generate_answer(question, chunk_data, api_details=None):
         header = "\n\n".join(headers) + "\n\n"
     prompt = f"""
     {header}
-    You are an expert in planning applications. Using the following document excerpts, answer the question:
+    You are an expert in planning applications. Consider the document excerpts carefully and answer the following question:
     "{question}"
 
     Documents:
@@ -197,7 +217,6 @@ def generate_answer(question, chunk_data, api_details=None):
 def get_one_thousand(limit_start: int, params_object: dict) -> str:
     """
     Construct the API URL to retrieve 1000 records starting at limit_start.
-    This follows the provided JavaScript example by adding parameters only if provided.
     """
     base_url = os.getenv("BUILDING_INFO_API_BASE_URL", "https://api12.buildinginfo.com/api/v2/bi/projects/t-projects")
     api_key = os.getenv("BUILDING_INFO_API_KEY")
@@ -209,29 +228,17 @@ def get_one_thousand(limit_start: int, params_object: dict) -> str:
     # Add category parameter if applicable
     if params_object.get("category") not in (0, None):
         api_url += "&category=" + str(params_object.get("category"))
-
-    # Add subcategory parameter if applicable
     if params_object.get("subcategory") not in (0, None):
         api_url += "&subcategory=" + str(params_object.get("subcategory"))
-
-    # Add county parameter if applicable
     if params_object.get("county") not in (0, None):
         api_url += "&county=" + str(params_object.get("county"))
-
     if params_object.get("type") not in (0, None):
         api_url += "&type=" + str(params_object.get("type"))
-
     if params_object.get("stage") not in (0, None):
         api_url += "&stage=" + str(params_object.get("stage"))
-
-    # Add nearby and radius parameters if provided
     if params_object.get("latitude") and params_object.get("longitude") and params_object.get("radius"):
         api_url += f"&nearby={params_object['latitude']},{params_object['longitude']}&radius={params_object['radius']}"
-
-    # Always add _apion=1 parameter (can be extended based on UI selections)
     api_url += "&_apion=1.1"
-
-    # Add pagination parameter to retrieve 1000 records starting at limit_start
     api_url += f"&more=limit {limit_start},1000"
 
     print("GET ONE THOUSAND URL:", api_url)
@@ -241,8 +248,7 @@ def get_one_thousand(limit_start: int, params_object: dict) -> str:
 def get_projects_by_params(params_object: dict):
     """
     Call the Building Information API using a structured parameter object.
-    This retrieves all matching records by paginating through the results.
-    Returns a tuple of (project_ids, full_project_data) aggregated over all pages.
+    Retrieves all matching records by paginating through the results.
     """
     limit_start = 0
     all_project_ids = []
@@ -292,9 +298,8 @@ def main():
         use_api = input("Apply API filtering? (y/n): ").lower().strip() == 'y'
         api_params = {}
         api_details = {}
-        allowed_api_ids = []
         if use_api:
-            print("Enter API parameters as a JSON string (e.g. {\"category\":1, \"county\":\"Dublin\"}). Leave empty for defaults:")
+            print("Enter API parameters as a JSON string (e.g. {\"category\":1, \"county\":3}). Leave empty for defaults:")
             params_input = input("🔧 API Parameters: ").strip()
             if params_input:
                 try:
@@ -310,33 +315,24 @@ def main():
                 print("\n" + "=" * 50 + "\n")
                 continue
 
-            allowed_api_ids = set(api_project_ids)
+            # Convert API project IDs to strings for consistency and build a Pinecone filter
+            allowed_api_ids = set(str(pid) for pid in api_project_ids)
+            filter_obj = {"project_id": {"$in": list(allowed_api_ids)}}
 
             # Build API details dictionary for each project
             for row in api_data:
                 pid = row.get("planning_id")
                 if pid:
-                    api_details[pid] = {
+                    api_details[str(pid)] = {
                         "planning_title": row.get("planning_title", "N/A"),
                         "planning_public_updated": row.get("planning_public_updated", "N/A"),
                         "planning_stage": row.get("planning_stage", "N/A"),
                         "planning_urlopen": row.get("planning_urlopen", "N/A")
                     }
 
-            # Instead of applying a Pinecone filter (which requires metadata),
-            # we will manually filter the results after the search.
-            project_ids, chunk_data = search_pinecone(query, top_k=10)
-            filtered_project_ids = []
-            filtered_chunk_data = {}
-            for pid, chunks in chunk_data.items():
-                if pid in allowed_api_ids:
-                    filtered_project_ids.append(pid)
-                    filtered_chunk_data[pid] = chunks
-            project_ids = filtered_project_ids
-            chunk_data = filtered_chunk_data
-
-            # Print the matching project IDs from the API
-            print("\n✅ Matching project IDs:", list(filtered_project_ids))
+            # Pass the filter directly into the Pinecone query
+            project_ids, chunk_data = search_pinecone(query, top_k=10, filter_obj=filter_obj)
+            print("\n✅ Matching project IDs:", project_ids)
         else:
             project_ids, chunk_data = search_pinecone(query)
 
