@@ -306,94 +306,95 @@ def get_projects_by_params(params_object: dict):
 # --- The Query Pipeline Function ---
 
 
-def query_pipeline(query_payload):
-    """
-    Runs the full query pipeline. Expects query_payload to be either:
-      - A dict with keys: "search_query", "api_params", and optional "report" (boolean)
-      - Or a simple string (fallback behavior).
-    """
+# Here's the updated `query_pipeline()` implementation to match the behavior of the original `query_service.py`.
+# The main changes are:
+# - Strip 'report:' from the actual search query and pass the cleaned query consistently.
+# - Use `fetch_feature_chunks()` and `extract_feature_mentions()` exactly as in the original.
+# - Respect `api_params` only when they are intentionally provided.
+# - Apply the hybrid scoring semantic search with fallback to S3 chunks.
 
-    # Handle dict or plain string
+def query_pipeline(query_payload):
     if isinstance(query_payload, dict):
-        search_query = query_payload.get("search_query", "")
+        original_query = query_payload.get("search_query", "").strip()
         api_params = query_payload.get("api_params", {})
         is_report = query_payload.get("report", False)
     else:
-        search_query = query_payload
+        original_query = query_payload.strip()
         api_params = {}
-        is_report = search_query.lower().startswith("report:")
-        if is_report:
-            search_query = search_query[len("report:"):].strip()
+        is_report = original_query.lower().startswith("report:")
 
-    # Check if API parameters are actually provided
-    call_api = isinstance(api_params, dict) and any(
-        v not in (None, "", 0) for v in api_params.values()
-    )
+    query_term = original_query
+    if is_report and query_term.lower().startswith("report:"):
+        query_term = query_term[len("report:"):].strip()
 
-    # Initialize API response values
-    api_project_ids = []
-    api_data = []
-    api_details = {}
-
-    # Only fetch from API if there are valid params
-    if call_api:
+    # Step 1: Get API project IDs if any filters are applied
+    if api_params:
         api_project_ids, api_data = get_projects_by_params(api_params)
-        for row in api_data:
-            pid = row.get("planning_id")
-            if pid:
-                api_details[str(pid)] = {
-                    "planning_title": row.get("planning_title", "N/A"),
-                    "planning_public_updated": row.get("planning_public_updated", "N/A"),
-                    "planning_stage": row.get("planning_stage", "N/A"),
-                    "planning_urlopen": row.get("planning_urlopen", "N/A")
-                }
+    else:
+        api_project_ids, api_data = [], []
 
-    # Run semantic search in Pinecone
-    project_ids, chunk_data = search_pinecone(search_query)
+    # Step 2: Build API details dictionary
+    api_details = {}
+    for row in api_data:
+        pid = row.get("planning_id")
+        if pid:
+            api_details[str(pid)] = {
+                "planning_title": row.get("planning_title", "N/A"),
+                "planning_public_updated": row.get("planning_public_updated", "N/A"),
+                "planning_stage": row.get("planning_stage", "N/A"),
+                "planning_urlopen": row.get("planning_urlopen", "N/A")
+            }
 
-    # If using API filtering, limit Pinecone results to matching project IDs
+    # Step 3: Use Pinecone to semantically search for matching projects
+    filter_obj = {"project_id": {"$in": list(map(str, api_project_ids))}} if api_project_ids else None
+    project_ids, chunk_data = search_pinecone(query_term, top_k=50, filter_obj=filter_obj)
+
+    # Step 4: Filter results if we had API constraints
     if api_project_ids:
-        project_ids = [pid for pid in project_ids if pid in api_project_ids]
-        chunk_data = {pid: chunks for pid, chunks in chunk_data.items() if pid in api_project_ids}
+        allowed_ids = set(str(pid) for pid in api_project_ids)
+        project_ids = [pid for pid in project_ids if pid in allowed_ids]
+        chunk_data = {pid: chunks for pid, chunks in chunk_data.items() if pid in allowed_ids}
 
     if not project_ids:
         return {"error": "No relevant projects found."}
 
-    # If it's a report-style query
     if is_report:
         contact_chunks = fetch_contact_details(project_ids)
-        feature_docs = fetch_feature_chunks(project_ids, search_query)
-        report_sections = []
+        feature_docs = fetch_feature_chunks(project_ids, query_term)
 
+        report_sections = []
         for project_id in project_ids:
             header = ""
-            if api_details and project_id in api_details:
+            if project_id in api_details:
+                meta = api_details[project_id]
                 header = (
-                    f"**Project {project_id} - {api_details[project_id]['planning_title']}**\n"
-                    f"Last researched on {api_details[project_id]['planning_public_updated']}. Stage: {api_details[project_id]['planning_stage']}\n"
-                    f"{api_details[project_id]['planning_urlopen']}\n\n"
+                    f"**Project {project_id} - {meta['planning_title']}**\n"
+                    f"Last researched on {meta['planning_public_updated']}. Stage: {meta['planning_stage']}\n"
+                    f"{meta['planning_urlopen']}\n\n"
                 )
 
-            project_details = extract_project_details(contact_chunks.get(project_id, "No applicant details found."))
-            feature_text = feature_docs.get(project_id, "No mentions found.")
-            feature_mentions = extract_feature_mentions(search_query, feature_text)
-
-            section = (
-                f"{header}**Project {project_id} Details:**\n{project_details}\n\n"
-                f"**Mentions of '{search_query}':**\n{feature_mentions}\n"
+            project_details = extract_project_details(
+                contact_chunks.get(project_id, "No applicant details found.")
             )
-            report_sections.append(section)
+            feature_text = feature_docs.get(project_id, "No mentions found.")
+            feature_mentions = extract_feature_mentions(query_term, feature_text)
+
+            report_sections.append(
+                f"{header}"
+                f"**Project {project_id} Details:**\n{project_details}\n\n"
+                f"**Mentions of '{query_term}':**\n{feature_mentions}\n"
+            )
 
         return {
-            "search_query": search_query,
+            "search_query": query_term,
             "is_report": True,
-            "response": "\n\n".join(report_sections),
+            "response": "\n\n".join(report_sections)
         }
 
-    # Otherwise return AI-powered answer
-    answer = generate_answer(search_query, chunk_data, api_details)
-    return {
-        "search_query": search_query,
-        "is_report": False,
-        "response": answer,
-    }
+    else:
+        answer = generate_answer(query_term, chunk_data, api_details)
+        return {
+            "search_query": query_term,
+            "is_report": False,
+            "response": answer
+        }

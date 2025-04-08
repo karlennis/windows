@@ -5,7 +5,6 @@ import re
 import requests
 from dotenv import load_dotenv
 from pinecone import Pinecone
-# Removed SentenceTransformer since we are no longer using the local model
 from utils.config import PINECONE_API_KEY, OPENAI_API_KEY, S3_BUCKET, S3_REGION
 import openai
 
@@ -56,7 +55,6 @@ def search_pinecone(query_text, top_k=50, filter_obj=None):
     enriched = []
     for match in results["matches"]:
         metadata = match.get("metadata", {})
-        # Ensure project_id is a string for consistency
         project_id = str(metadata.get("project_id", match["id"].split("_chunk_")[0]))
         chunk_number = match["id"].split("_chunk_")[-1]
         score = match["score"]
@@ -64,7 +62,6 @@ def search_pinecone(query_text, top_k=50, filter_obj=None):
         # Use metadata chunk if available, otherwise fetch from S3
         chunk_text_value = metadata.get("chunk_text") or fetch_chunk_from_s3(project_id, int(chunk_number))
 
-        # Add a bonus for keyword overlap in hybrid scoring
         keyword_hits = sum(word.lower() in chunk_text_value.lower() for word in query_text.split())
         hybrid_score = score + 0.01 * keyword_hits
 
@@ -76,7 +73,6 @@ def search_pinecone(query_text, top_k=50, filter_obj=None):
             "chunk_text": chunk_text_value
         })
 
-    # 4. Filter and sort the results
     filtered = [m for m in enriched if m["original_score"] >= SIMILARITY_THRESHOLD]
     top_results = sorted(filtered, key=lambda x: x["hybrid_score"], reverse=True)[:FINAL_TOP_K]
 
@@ -86,7 +82,6 @@ def search_pinecone(query_text, top_k=50, filter_obj=None):
         print(f"- Project {m['project_id']} | Chunk {m['chunk_number']} | Score: {m['original_score']:.2f} | Hybrid: {m['hybrid_score']:.2f}")
 
     return list(chunk_data.keys()), chunk_data
-
 
 def fetch_chunk_from_s3(application_number, chunk_index, chunk_size=300):
     """
@@ -104,6 +99,18 @@ def fetch_chunk_from_s3(application_number, chunk_index, chunk_size=300):
     end = start + chunk_size
     return " ".join(words[start:end])
 
+def fetch_full_text(project_id):
+    """
+    Fetch the full document text for the given project from S3.
+    """
+    s3_key = f"planning_documents_2025_04/{project_id}/docfiles.txt"
+    try:
+        response = s3.get_object(Bucket=S3_BUCKET, Key=s3_key)
+        full_text = response["Body"].read().decode("utf-8")
+        return full_text
+    except Exception as e:
+        print(f"⚠️ Failed to fetch full text for project {project_id}: {e}")
+        return ""
 
 def fetch_contact_details(project_ids):
     """
@@ -111,10 +118,29 @@ def fetch_contact_details(project_ids):
     """
     contact_query = ("Find the 'Applicant Details' or contact section including names, emails, "
                      "phone numbers, and company details.")
-    _, contact_chunk_data = search_pinecone(contact_query, top_k=7 * len(project_ids))
+    filter_obj = {"project_id": {"$in": list(project_ids)}}
+    _, contact_chunk_data = search_pinecone(contact_query, top_k=7 * len(project_ids), filter_obj=filter_obj)
     combined_docs = {app: "\n".join(parts) for app, parts in contact_chunk_data.items()}
     return combined_docs
 
+def fetch_feature_chunks(project_ids, feature):
+    """
+    For each project, fetch the full text from S3 and extract sentences that mention the given feature.
+    """
+    feature_docs = {}
+    for project_id in project_ids:
+        full_text = fetch_full_text(project_id)
+        if full_text:
+            # Split full text into sentences. This regex splits on punctuation followed by whitespace.
+            sentences = re.split(r'(?<=[.!?])\s+', full_text)
+            matching_sentences = [sentence for sentence in sentences if feature.lower() in sentence.lower()]
+            if matching_sentences:
+                feature_docs[project_id] = " ".join(matching_sentences)
+            else:
+                feature_docs[project_id] = "No mentions found."
+        else:
+            feature_docs[project_id] = "No document available."
+    return feature_docs
 
 def extract_project_details(text):
     """Extract structured project details using OpenAI."""
@@ -139,15 +165,17 @@ def extract_project_details(text):
     )
     return response.choices[0].message.content
 
-
-def extract_feature_mentions(question, project_chunks):
-    """Extract mentions of the queried feature from the relevant chunks."""
-    combined_text = "\n".join(project_chunks)
+def extract_feature_mentions(question, project_text):
+    """
+    Given the text that contains matching sentences for a feature, instruct OpenAI to summarize the key mentions.
+    """
     feature_prompt = f"""
-    Identify all mentions and specifications of '{question}' in the following planning document excerpts:
-    {combined_text}
+    You are an expert in planning applications. Analyze the following text for any mentions or specifications of '{question}'.
+    If there are any sentences that mention '{question}', list them and provide a concise summary of the key details in 2-3 sentences.
+    If no relevant details are found, simply state that there are no mentions.
 
-    Summarize the key details in 2-3 sentences.
+    Text:
+    {project_text}
     """
     response = openai.chat.completions.create(
         model="gpt-4o-mini",
@@ -155,11 +183,12 @@ def extract_feature_mentions(question, project_chunks):
     )
     return response.choices[0].message.content
 
-
 def generate_report(question, project_ids, chunk_data, api_details=None):
     """Generate a structured report including API metadata, project details, and feature mentions."""
     print("🔎 Fetching detailed project metadata...")
     contact_chunks = fetch_contact_details(project_ids)
+    # Instead of using semantic search for the feature, fetch the full text sentences for the feature.
+    feature_docs = fetch_feature_chunks(project_ids, question)
     report_sections = []
 
     for project_id in project_ids:
@@ -174,13 +203,13 @@ def generate_report(question, project_ids, chunk_data, api_details=None):
         project_details = extract_project_details(
             contact_chunks.get(project_id, "No applicant details found.")
         )
-        feature_mentions = extract_feature_mentions(question, chunk_data.get(project_id, ["No mentions found."]))
+        feature_text = feature_docs.get(project_id, "No mentions found.")
+        feature_mentions = extract_feature_mentions(question, feature_text)
         section = f"{header}" + \
                   f"**Project {project_id} Details:**\n{project_details}\n\n" \
                   f"**Mentions of '{question}':**\n{feature_mentions}\n"
         report_sections.append(section)
     return "\n\n".join(report_sections)
-
 
 def generate_answer(question, chunk_data, api_details=None):
     """Generate an AI-powered answer using combined document excerpts and API metadata if available."""
@@ -211,7 +240,6 @@ def generate_answer(question, chunk_data, api_details=None):
     )
     return response.choices[0].message.content
 
-
 # --- New API Searching Functions ---
 
 def get_one_thousand(limit_start: int, params_object: dict) -> str:
@@ -221,11 +249,8 @@ def get_one_thousand(limit_start: int, params_object: dict) -> str:
     base_url = os.getenv("BUILDING_INFO_API_BASE_URL", "https://api12.buildinginfo.com/api/v2/bi/projects/t-projects")
     api_key = os.getenv("BUILDING_INFO_API_KEY")
     ukey = os.getenv("BUILDING_INFO_API_UKEY")
-
-    # Initialize URL with API key and user key
     api_url = f"{base_url}?api_key={api_key}&ukey={ukey}"
 
-    # Add category parameter if applicable
     if params_object.get("category") not in (0, None):
         api_url += "&category=" + str(params_object.get("category"))
     if params_object.get("subcategory") not in (0, None):
@@ -240,10 +265,8 @@ def get_one_thousand(limit_start: int, params_object: dict) -> str:
         api_url += f"&nearby={params_object['latitude']},{params_object['longitude']}&radius={params_object['radius']}"
     api_url += "&_apion=1.1"
     api_url += f"&more=limit {limit_start},1000"
-
     print("GET ONE THOUSAND URL:", api_url)
     return api_url
-
 
 def get_projects_by_params(params_object: dict):
     """
@@ -283,7 +306,6 @@ def get_projects_by_params(params_object: dict):
     print("Total project IDs fetched:", len(all_project_ids))
     return all_project_ids, all_rows
 
-
 def main():
     print("\n📜 Planning Applications Query System")
     print("Type your question below. To generate a report with contact details, prefix your query with 'report:'.")
@@ -294,7 +316,6 @@ def main():
         if query.lower() == 'exit':
             break
 
-        # Ask if the user wants to apply API filtering via the new API search
         use_api = input("Apply API filtering? (y/n): ").lower().strip() == 'y'
         api_params = {}
         api_details = {}
@@ -308,18 +329,15 @@ def main():
                     print("Invalid JSON provided. Using empty parameters.")
                     api_params = {}
 
-            # Get API projects (all pages)
             api_project_ids, api_data = get_projects_by_params(api_params)
             if not api_project_ids:
                 print("❌ Docs don't exist.")
                 print("\n" + "=" * 50 + "\n")
                 continue
 
-            # Convert API project IDs to strings for consistency and build a Pinecone filter
             allowed_api_ids = set(str(pid) for pid in api_project_ids)
             filter_obj = {"project_id": {"$in": list(allowed_api_ids)}}
 
-            # Build API details dictionary for each project
             for row in api_data:
                 pid = row.get("planning_id")
                 if pid:
@@ -330,7 +348,6 @@ def main():
                         "planning_urlopen": row.get("planning_urlopen", "N/A")
                     }
 
-            # Pass the filter directly into the Pinecone query
             project_ids, chunk_data = search_pinecone(query, top_k=10, filter_obj=filter_obj)
             print("\n✅ Matching project IDs:", project_ids)
         else:
@@ -352,7 +369,6 @@ def main():
             print(answer)
 
         print("\n" + "=" * 50 + "\n")
-
 
 if __name__ == "__main__":
     main()
