@@ -303,15 +303,7 @@ def get_projects_by_params(params_object: dict):
     return all_project_ids, all_rows
 
 
-# --- The Query Pipeline Function ---
 
-
-# Here's the updated `query_pipeline()` implementation to match the behavior of the original `query_service.py`.
-# The main changes are:
-# - Strip 'report:' from the actual search query and pass the cleaned query consistently.
-# - Use `fetch_feature_chunks()` and `extract_feature_mentions()` exactly as in the original.
-# - Respect `api_params` only when they are intentionally provided.
-# - Apply the hybrid scoring semantic search with fallback to S3 chunks.
 
 def query_pipeline(query_payload):
     if isinstance(query_payload, dict):
