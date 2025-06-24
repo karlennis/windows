@@ -1,3 +1,6 @@
 __pycache__/
 .env
 data_ingestion/renameScript/docfiles
+*.csv
+data_ingestion/pdfs
+

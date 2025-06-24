@@ -8,3 +8,7 @@ pinecone
 sentence-transformers
 python-dotenv
 nltk
+paramiko
+pandas
+openpyxl
+rank-bm25

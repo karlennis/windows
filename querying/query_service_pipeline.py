@@ -21,7 +21,7 @@ openai.api_key = os.getenv("OPENAI_API_KEY")
 def search_pinecone(query_text, top_k=50, filter_obj=None):
     SIMILARITY_THRESHOLD = 0.2
     FINAL_TOP_K = 15
-    NAMESPACE = "default"
+    NAMESPACE = os.getenv("PINECONE_NAMESPACE")
     embedding = openai.embeddings.create(model="text-embedding-3-small", input=[query_text])
     query_embedding = embedding.data[0].embedding
     results = index.query(
@@ -57,7 +57,7 @@ def search_pinecone(query_text, top_k=50, filter_obj=None):
     return list(chunk_data.keys()), chunk_data
 
 def fetch_chunk_from_s3(application_number, chunk_index, chunk_size=300):
-    s3_key = f"planning_documents_2025_04/{application_number}/docfiles.txt"
+    s3_key = f"self-build-2025-1.1/{application_number}/docfiles.txt"
     try:
         response = s3.get_object(Bucket=S3_BUCKET, Key=s3_key)
         full_text = response["Body"].read().decode("utf-8")
@@ -69,7 +69,7 @@ def fetch_chunk_from_s3(application_number, chunk_index, chunk_size=300):
     return " ".join(words[start:end])
 
 def fetch_full_text(project_id):
-    s3_key = f"planning_documents_2025_04/{project_id}/docfiles.txt"
+    s3_key = f"self-build-2025-1.1/{project_id}/docfiles.txt"
     try:
         response = s3.get_object(Bucket=S3_BUCKET, Key=s3_key)
         return response["Body"].read().decode("utf-8")
