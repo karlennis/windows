@@ -207,7 +207,7 @@ def search_pinecone(query: str, *, filter_obj=None):
     return list(chunks.keys()), chunks
 
 # ═════════════ Feature snippets + GPT summary helper ══════════════════════════
-def build_feature_section(query: str, text: str, window=8, max_hits=20) -> str:
+def build_feature_section(query: str, text: str, window=16, max_hits=20) -> str:
     sents = re.split(r"(?<=[.!?])\s+", text)
     hits = [s for s in sents if query.lower() in s.lower()]
     if not hits:
@@ -237,8 +237,8 @@ def build_feature_section(query: str, text: str, window=8, max_hits=20) -> str:
             {
                 "role": "user",
                 "content": (
-                    f"In 2–3 sentences, summarise what suppliers need to know about "
-                    f'**{query}** based on these snippets.'
+                    f"In 2–3 sentences, summarise these snippets, focusing on key points and insights suppliers need to know about **{query}**.\n\n"
+                    f"Snippets:\n{chr(10).join(snippets)}"
                 ),
             }
         ]
@@ -270,13 +270,16 @@ def query_pipeline(payload):
     api_meta = {
         r["planning_id"]: {
             "planning_title":        r.get("planning_title", "N/A"),
-            "planning_description":  r.get("planning_description", "N/A"),   # ← NEW
+            "planning_description":  r.get("planning_description", "N/A"),
+            "planning_category":     r.get("planning_category", "N/A"),
             "updated_on": (
                 _dt.datetime.fromisoformat(r["planning_public_updated"]).strftime("%d/%m/%Y")
                 if r.get("planning_public_updated") else "N/A"
             ),
             "planning_stage":        r.get("planning_stage", "N/A"),
             "planning_urlopen":      r.get("planning_urlopen", "N/A"),
+            "bii_url":               ("https://app.buildinginfo.com/" + str(r["planning_path_url"])),
+
         }
         for r in api_rows
         if r.get("planning_id")
@@ -307,12 +310,14 @@ def query_pipeline(payload):
                 meta = {
                     "planning_title":        row.get("planning_title", "N/A"),
                     "planning_description":  row.get("planning_description", "N/A"),   # ← NEW
+                    "planning_category":     row.get("planning_category", "N/A"),
                     "updated_on": (
                         _dt.datetime.fromisoformat(row["planning_public_updated"]).strftime("%d/%m/%Y")
                         if row.get("planning_public_updated") else "N/A"
                     ),
                     "planning_stage":        row.get("planning_stage", "N/A"),
                     "planning_urlopen":      row.get("planning_urlopen", "N/A"),
+                    "bii_url":               ("https://app.buildinginfo.com/" + str(row["planning_path_url"])),
                 }
 
             projects.append(
