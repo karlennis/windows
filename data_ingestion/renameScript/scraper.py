@@ -18,7 +18,7 @@ KEY_PASSPHRASE = None
 
 # === Paths ===
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-CSV_FILE = os.path.join(SCRIPT_DIR, "self-build-2025.csv")
+CSV_FILE = os.path.join(SCRIPT_DIR, "application_spec_all_june.csv")
 TEMP_DIR = os.path.join(SCRIPT_DIR, "temp_dl")
 
 # === Init AWS S3 ===

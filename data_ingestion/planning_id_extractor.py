@@ -18,7 +18,7 @@ if not API_KEY or not UKEY:
 PARAMS = (
     f"api_key={API_KEY}"
     f"&ukey={UKEY}"
-    f"&category=11"
+    # f"&category=11"
     f"&_apion=1"
     # f"&min_apion=2024-01-01"
     # f"&max_apion=2024-12-31"
